@@ -262,7 +262,7 @@ void CamCalib::saveCameraParams(const cv::Size& imageSize, const cv::Mat& camera
 
 
 int main(int argc, char **argv) {
-  ros::init(argc, argv, "fisheye_calib");  
+  ros::init(argc, argv, "cam_calib");
   ros::NodeHandle nh;
   cam_calib::CamCalib fcal(&nh);
   ros::spin();
