@@ -32,8 +32,8 @@ private:
   enum Mode {CAPTURING, CALIBRATED, UNDISTORTING};
 
   void imageCallback(const sensor_msgs::ImageConstPtr& msg);
-  bool runCalibration(cv::Mat& cameraMatrix, cv::Mat& distCoeffs, cv::Size imageSize,
-                      std::vector< std::vector<cv::Point2f> > imagePoints);
+  bool runCalibration(const cv::Size imageSize, const std::vector< std::vector<cv::Point2f> > imagePoints,
+                      cv::Mat& cameraMatrix, cv::Mat& distCoeffs);
   void calcBoardCornerPositions(std::vector<cv::Point3f>& corners);
   double computeReprojectionErrors(const std::vector< std::vector<cv::Point3f> >& objectPoints,
                                    const std::vector< std::vector<cv::Point2f> >& imagePoints,

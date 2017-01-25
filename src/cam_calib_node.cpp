@@ -9,7 +9,7 @@ CamCalib::CamCalib(ros::NodeHandle* nh) {
     return;
 
   if (inputType_ == ROS_IMAGE_SUB) {
-    std::cout << "Subscribe ROS image\n";
+    std::cout << "Subscribe ROS image!\n";
     image_transport::ImageTransport imageTransp(*nh);
     imageSub_ = imageTransp.subscribe(inputTopic_, 1, &CamCalib::imageCallback, this);
   }
@@ -20,12 +20,16 @@ void CamCalib::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   imageCurr_ = cv_bridge::toCvShare(msg, msg->encoding)->image;
   std::vector<cv::Point2f> pointBuf;
   if (mode_ == CAPTURING) {
+    // Detect all corners (=boardSize width * height) from the image
+    // and store the pixel positions of the corners.
     bool found = cv::findChessboardCorners(imageCurr_, boardSize_, pointBuf, chessBoardFlags_);
     if (found) {
       cv::drawChessboardCorners(imageCurr_, boardSize_, cv::Mat(pointBuf), found);
-      imagePoints_.push_back(pointBuf);
+      imagePoints_.push_back(pointBuf); // Collect pixel points for calibration
+      // If the number of images that found all corners is equal to (or larger than)
+      // the desired number of frame sampling, start calibration.
       if (imagePoints_.size() >= (size_t)nrFrames_) {
-        if (runCalibration(camMat_, distCoeffs_, imageCurr_.size(), imagePoints_)) {
+        if (runCalibration(imageCurr_.size(), imagePoints_, camMat_, distCoeffs_)) {
           mode_ = CALIBRATED;
         } else {
           ROS_ERROR("Calibration failed! Restart!");
@@ -35,13 +39,15 @@ void CamCalib::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
     } else {
       std::cout << "Cannot find corners\n";
     }
+    // Display the current frame number / the desired frame number
     std::string showText = cv::format("%d / %d", (int)imagePoints_.size(), nrFrames_);
     cv::putText(imageCurr_, showText, cv::Point(60, 60), 1, 3, cv::Scalar(0, 255, 0));
   } else if (mode_ == CALIBRATED) {
-    std::cout << "Done calibration!\n";
-
+    // Save camera calibration prameters (image size, distortion coeff, camera mat)
+    std::cout << "Done calibration! Save parameters to :\n" << outputFileName_ << std::endl;
     saveCameraParams(imageCurr_.size(), camMat_, distCoeffs_, outputFileName_);
 
+    // Generate undistorted camera matrix, map1_ and map2_ for undistorting image
     if (useFisheye_) {
       cv::fisheye::estimateNewCameraMatrixForUndistortRectify(camMat_, distCoeffs_, imageCurr_.size(),
                                                               cv::Matx33d::eye(), newCamMat_, 1);
@@ -52,11 +58,10 @@ void CamCalib::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
                                   cv::getOptimalNewCameraMatrix(camMat_, distCoeffs_, imageCurr_.size(), 1,
                                                                 imageCurr_.size(), 0),
                                   imageCurr_.size(), CV_16SC2, map1_, map2_);
-    }
+    }    
     mode_ = UNDISTORTING;
-
-
   } else if (mode_ == UNDISTORTING) {
+    // Undistort image
     cv::Mat temp = imageCurr_.clone();
     cv::remap(temp, imageCurr_, map1_, map2_, cv::INTER_LINEAR);
   }
@@ -64,35 +69,41 @@ void CamCalib::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   cv::waitKey(delay_);
 }
 
-bool CamCalib::runCalibration(cv::Mat& cameraMatrix, cv::Mat& distCoeffs, cv::Size imageSize,
-                    std::vector< std::vector<cv::Point2f> > imagePoints) {
-
-  std::vector<cv::Mat> rvecs, tvecs;
-  std::vector<float> reprojErrs;
-  double totalAvgErr = 0;
+bool CamCalib::runCalibration(const cv::Size imageSize, const std::vector< std::vector<cv::Point2f> > imagePoints,
+                              cv::Mat& cameraMatrix, cv::Mat& distCoeffs) {
 
   //! [fixed_aspect]
   cameraMatrix = cv::Mat::eye(3, 3, CV_64F);
   if (flag_ & cv::CALIB_FIX_ASPECT_RATIO )
     cameraMatrix.at<double>(0,0) = aspectRatio_;
 
-  //! [fixed_aspect]
   if (useFisheye_)
     distCoeffs = cv::Mat::zeros(4, 1, CV_64F);
   else
     distCoeffs = cv::Mat::zeros(8, 1, CV_64F);
 
+  // Calculate the 3d pos of the corners in the chess board coordinate frame
+  // Since all the 3d pos are the same for the sample images,
+  // copy the first one to the rest of the sample images by using 'resize' function
   std::vector< std::vector<cv::Point3f> > objectPoints(1);
+  // Generate the first 3d pos of the corners
   calcBoardCornerPositions(objectPoints[0]);
+  // Copy objectPoints[0] to the rest of objectPoints
   objectPoints.resize(imagePoints.size(),objectPoints[0]);
 
   //Find intrinsic and extrinsic camera parameters
   double rms;
-
+  std::vector<cv::Mat> rvecs, tvecs;
   if (useFisheye_) {
     cv::Mat _rvecs, _tvecs;
-    rms = cv::fisheye::calibrate(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
-                                 _rvecs, _tvecs, flag_);
+    rms = cv::fisheye::calibrate(objectPoints,  // 3d pos of the corners in the chess board frame
+                                 imagePoints,   // distorted 2d pixel pos in the pixel image frame
+                                 imageSize,     // pixel image size (width, height)
+                                 cameraMatrix,  // output: camera matrix
+                                 distCoeffs,    // output: distortion coefficients
+                                 _rvecs,        // output: Rodrigues rot vecs (3 by 1) of all the board poses
+                                 _tvecs,        // output: trans vecs (3 by 1) of all the board poses
+                                 flag_);
     rvecs.reserve(_rvecs.rows);
     tvecs.reserve(_tvecs.rows);
     for(int i = 0; i < int(objectPoints.size()); i++){
@@ -101,9 +112,11 @@ bool CamCalib::runCalibration(cv::Mat& cameraMatrix, cv::Mat& distCoeffs, cv::Si
     }
   } else {
     rms = cv::calibrateCamera(objectPoints, imagePoints, imageSize, cameraMatrix, distCoeffs,
-                          rvecs, tvecs, flag_);
+                              rvecs, tvecs, flag_);
   }
 
+  std::vector<float> reprojErrs;
+  double totalAvgErr = 0;
   std::cout << "Re-projection error reported by calibrateCamera: "<< rms << std::endl;
   bool ok = cv::checkRange(cameraMatrix) && cv::checkRange(distCoeffs);
   totalAvgErr = computeReprojectionErrors(objectPoints, imagePoints, rvecs, tvecs, cameraMatrix,
@@ -133,8 +146,11 @@ double CamCalib::computeReprojectionErrors(const std::vector< std::vector<cv::Po
   perViewErrors.resize(objectPoints.size());
 
   for (std::size_t i = 0; i < objectPoints.size(); ++i ) {
-    if (fisheye) {
+    if (fisheye) {      
+      // Estimate reprojection from 3d point to 2d pixel point
+      // with known transf(rot and trans) and cam parameters.
       cv::fisheye::projectPoints(objectPoints[i], imagePoints2, rvecs[i], tvecs[i], cameraMatrix, distCoeffs);
+
     } else {
       cv::projectPoints(objectPoints[i], rvecs[i], tvecs[i], cameraMatrix, distCoeffs, imagePoints2);
     }
